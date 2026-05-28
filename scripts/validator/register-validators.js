@@ -9,11 +9,10 @@ const HOST            = process.env.HOST             || 'node.zetrix.com';
 const FUNDER_ADDRESS  = process.env.FUNDER_ADDRESS;
 const FUNDER_KEY      = process.env.FUNDER_PRIVATE_KEY;
 const DPOS_CONTRACT   = process.env.DPOS_CONTRACT    || 'ZTX3ePNZQhndgGzKLmg1SFfno3N42mLhPYJMN';
-const TRANSFER_AMOUNT = process.env.TRANSFER_AMOUNT  || '100000000000'; // default: 100,000 ZETRIX
-const MIN_PLEDGE      = process.env.MIN_PLEDGE       || '100000000000'; // default: 100,000 ZETRIX
+const TRANSFER_AMOUNT = process.env.TRANSFER_AMOUNT  || '100000000000';
+const MIN_PLEDGE      = process.env.MIN_PLEDGE       || '100000000000';
 const REWARD_RATIO    = 0;
 const TOTAL           = parseInt(process.env.TOTAL       || '337');
-const START_INDEX     = parseInt(process.env.START_INDEX || '1');
 const OUTPUT_FILE     = './output/validators.json';
 const CONFIRM_RETRIES = 15;
 const CONFIRM_DELAY   = 3000;
@@ -101,11 +100,11 @@ async function createAccount() {
     };
 }
 
-// ── Step 2: Transfer ZETRIX from funder to pool account ──────────────────────
-// gasSendOperation transfers coins and auto-creates the account if it doesn't exist.
-// Node account is NOT funded — keypair only, used when setting up the validator node.
+// ── Step 2: Fund pool account ─────────────────────────────────────────────────
+// gasSendOperation transfers coins and auto-creates the account if needed.
+// Returns the pool balance after funding.
 
-async function activateAndFund(poolAddress) {
+async function fundPool(poolAddress) {
     console.log(`  [2] Funding pool account ${poolAddress} with ${TRANSFER_AMOUNT} ZETA...`);
 
     const operation = sdk.operation.gasSendOperation({
@@ -119,6 +118,12 @@ async function activateAndFund(poolAddress) {
     console.log(`    Funding tx: ${hash}`);
     await waitForTx(hash);
 
+    return hash;
+}
+
+// ── Balance check ─────────────────────────────────────────────────────────────
+
+async function checkBalance(poolAddress) {
     const balanceResult = await sdk.account.getBalance(poolAddress);
     if (balanceResult.errorCode !== 0) throw new Error(`getBalance failed [${balanceResult.errorCode}]: ${JSON.stringify(balanceResult)}`);
     const balance = balanceResult.result.balance;
@@ -126,13 +131,10 @@ async function activateAndFund(poolAddress) {
     if (new BigNumber(balance).lt(MIN_PLEDGE)) {
         throw new Error(`Pool balance ${balance} ZETA is less than MIN_PLEDGE ${MIN_PLEDGE} ZETA — cannot apply`);
     }
-
-    return hash;
+    return balance;
 }
 
-// ── Step 3: Apply to DPoS contract ──────────────────────────────────────────
-// Pool address is the sender and reward receiver.
-// Node address is the P2P node identity — registered separately, not funded here.
+// ── Step 3: Apply to DPoS contract ───────────────────────────────────────────
 
 async function applyAsValidator(poolAddress, poolPrivateKey, nodeAddress) {
     console.log(`  [3] Applying as validator (pool: ${poolAddress}, node: ${nodeAddress})...`);
@@ -141,9 +143,9 @@ async function applyAsValidator(poolAddress, poolPrivateKey, nodeAddress) {
         method: 'apply',
         params: {
             role:  'validator',
-            pool:  poolAddress,   // reward pool address
+            pool:  poolAddress,
             ratio: REWARD_RATIO,
-            node:  nodeAddress,   // P2P node address (separate keypair)
+            node:  nodeAddress,
         },
     };
 
@@ -161,7 +163,63 @@ async function applyAsValidator(poolAddress, poolPrivateKey, nodeAddress) {
     return hash;
 }
 
-// ── Main loop ────────────────────────────────────────────────────────────────
+// ── Process one validator record ──────────────────────────────────────────────
+// Resumes from whatever step was last completed, using on-chain balance as the
+// source of truth for whether funding already happened.
+
+async function processRecord(record, records, recordIndex) {
+    try {
+        delete record.error;
+
+        // Step 2: Fund if not yet funded (check on-chain balance)
+        if (!record.activationTxHash) {
+            // Check if pool already has enough balance (e.g. funded manually or partial run)
+            const balanceResult = await sdk.account.getBalance(record.pool.address);
+            const alreadyFunded = balanceResult.errorCode === 0 &&
+                new BigNumber(balanceResult.result.balance).gte(MIN_PLEDGE);
+
+            if (alreadyFunded) {
+                console.log(`  [2] Pool already funded (${balanceResult.result.balance} ZETA) — skipping transfer`);
+            } else {
+                record.activationTxHash = await fundPool(record.pool.address);
+                records[recordIndex] = record;
+                saveOutput(records);
+            }
+        } else {
+            console.log(`  [2] Already funded (tx: ${record.activationTxHash}) — skipping`);
+        }
+
+        // Balance check before apply
+        await checkBalance(record.pool.address);
+
+        // Step 3: Apply if not yet applied
+        if (!record.applyTxHash) {
+            record.applyTxHash = await applyAsValidator(
+                record.pool.address,
+                record.pool.privateKey,
+                record.node.address
+            );
+            records[recordIndex] = record;
+            saveOutput(records);
+        } else {
+            console.log(`  [3] Already applied (tx: ${record.applyTxHash}) — skipping`);
+        }
+
+        record.status = 'applied';
+        records[recordIndex] = record;
+        saveOutput(records);
+        console.log(`  Done ✓`);
+
+    } catch (err) {
+        record.status = 'failed';
+        record.error  = err.message;
+        records[recordIndex] = record;
+        saveOutput(records);
+        console.error(`  FAILED: ${err.message}`);
+    }
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
     if (!FUNDER_ADDRESS || !FUNDER_KEY) {
@@ -170,65 +228,75 @@ async function main() {
     }
 
     const records = loadOutput();
-    console.log(`Validator registration — total: ${TOTAL}, starting from index: ${START_INDEX}`);
+    console.log(`Validator registration — total: ${TOTAL}`);
     console.log(`Host: ${HOST}`);
     console.log(`Output: ${OUTPUT_FILE}\n`);
 
-    for (let i = START_INDEX; i <= TOTAL; i++) {
-        console.log(`\n── Validator ${i}/${TOTAL} ──────────────────────────────`);
+    // ── Phase 1: Resume any incomplete records from a previous run ────────────
+    const incomplete = records
+        .map((r, i) => ({ record: r, index: i }))
+        .filter(({ record }) => record.status !== 'applied');
 
-        const record = {
-            index:            i,
-            pool:             { address: null, privateKey: null, publicKey: null },
-            node:             { address: null, privateKey: null, publicKey: null },
-            activationTxHash: null,
-            applyTxHash:      null,
-            status:           'pending',
-            timestamp:        new Date().toISOString(),
-        };
-
-        try {
-            // Step 1: Create pool account + node account
-            console.log(`  [1] Creating pool and node accounts...`);
-            const poolAccount = await createAccount();
-            const nodeAccount = await createAccount();
-
-            record.pool = poolAccount;
-            record.node = nodeAccount;
-            console.log(`    Pool: ${poolAccount.address}`);
-            console.log(`    Node: ${nodeAccount.address}`);
-
-            // Save keys immediately — never lose them even if next steps fail
-            records.push(record);
-            saveOutput(records);
-
-            // Step 2: Activate + fund pool account only
-            record.activationTxHash = await activateAndFund(poolAccount.address);
-
-            // Step 3: Apply as validator — pool sends tx, node address registered
-            record.applyTxHash = await applyAsValidator(
-                poolAccount.address,
-                poolAccount.privateKey,
-                nodeAccount.address
-            );
-
-            record.status = 'applied';
-            records[records.length - 1] = record;
-            saveOutput(records);
-            console.log(`  Done ✓`);
-
-        } catch (err) {
-            record.status = 'failed';
-            record.error  = err.message;
-            records[records.length - 1] = record;
-            saveOutput(records);
-            console.error(`  FAILED: ${err.message}`);
+    if (incomplete.length > 0) {
+        console.log(`Found ${incomplete.length} incomplete record(s) from previous run — resuming...\n`);
+        for (const { record, index } of incomplete) {
+            console.log(`\n── Resuming Validator ${record.index} (status: ${record.status}) ──────────────────`);
+            await processRecord(record, records, index);
         }
     }
 
+    // ── Phase 2: Create new validators up to TOTAL ────────────────────────────
     const applied = records.filter(r => r.status === 'applied').length;
-    const failed  = records.filter(r => r.status === 'failed').length;
-    console.log(`\nCompleted. Applied: ${applied} | Failed: ${failed}`);
+    const remaining = TOTAL - applied;
+
+    if (remaining <= 0) {
+        console.log(`\nAll ${TOTAL} validators already applied. Nothing to do.`);
+    } else {
+        console.log(`\nCreating ${remaining} new validator(s)...\n`);
+        for (let i = 1; i <= remaining; i++) {
+            const globalIndex = records.length + 1;
+            console.log(`\n── Validator ${globalIndex}/${TOTAL} ──────────────────────────────`);
+
+            const record = {
+                index:            globalIndex,
+                pool:             { address: null, privateKey: null, publicKey: null },
+                node:             { address: null, privateKey: null, publicKey: null },
+                activationTxHash: null,
+                applyTxHash:      null,
+                status:           'pending',
+                timestamp:        new Date().toISOString(),
+            };
+
+            // Step 1: Create accounts and save keys immediately
+            console.log(`  [1] Creating pool and node accounts...`);
+            try {
+                const poolAccount = await createAccount();
+                const nodeAccount = await createAccount();
+                record.pool = poolAccount;
+                record.node = nodeAccount;
+                console.log(`    Pool: ${poolAccount.address}`);
+                console.log(`    Node: ${nodeAccount.address}`);
+            } catch (err) {
+                record.status = 'failed';
+                record.error  = err.message;
+                records.push(record);
+                saveOutput(records);
+                console.error(`  FAILED: ${err.message}`);
+                continue;
+            }
+
+            records.push(record);
+            saveOutput(records);
+
+            // Steps 2 & 3
+            await processRecord(record, records, records.length - 1);
+        }
+    }
+
+    const totalApplied = records.filter(r => r.status === 'applied').length;
+    const totalFailed  = records.filter(r => r.status === 'failed').length;
+    const totalPending = records.filter(r => r.status === 'pending').length;
+    console.log(`\nCompleted. Applied: ${totalApplied} | Failed: ${totalFailed} | Pending: ${totalPending}`);
     console.log(`Results saved to ${OUTPUT_FILE}`);
 }
 
