@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "register:validators": "node scripts/validator/register-validators.js"
+    "register:validators": "node scripts/validator/register-validators.js",
+    "sanity-check": "node scripts/validator/sanity-check.js"
   },
   "dependencies": {
     "dotenv": "^16.0.1",

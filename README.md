@@ -209,6 +209,53 @@ On startup it automatically scans `validators.json` for any `pending` or `failed
 | Both txs recorded, status not applied | Mark as applied |
 | Fully applied | Skip entirely |
 
+## Sanity Check
+
+After registration, run the sanity check to verify every record in `validators.json`:
+
+```bash
+npm run sanity-check
+```
+
+It checks each record for:
+
+| Check | What it verifies |
+|---|---|
+| Status | `status === 'applied'` |
+| Fields | `pool` and `node` address/key present |
+| Pool account | Account exists on-chain |
+| Funding tx | Transaction confirmed and `error_code = 0` |
+| Apply tx | Transaction confirmed and `error_code = 0` |
+| DPoS registration | Pool address and node address both in DPoS candidate list |
+
+Output example:
+```
+Sanity check — 337 record(s) in ./output/validators.json
+Host: node.zetrix.com
+DPoS contract: ZTX3ePNZQhndgGzKLmg1SFfno3N42mLhPYJMN
+
+Fetching DPoS candidate list... 337 candidate(s) found
+
+  ✓ [1] pool: ZTX3abc...
+  ✓ [2] pool: ZTX3def...
+  ✗ [3] pool: ZTX3ghi...
+  ✓ [4] pool: ZTX3jkl...
+  ...
+
+────────────────────────────────────────────────────────────
+Result: 336/337 passed
+
+Problems found (1):
+
+  ✗ [3] pool: ZTX3ghi... | node: ZTX3xyz...
+       → status is 'failed'
+       → apply tx: tx not found (11)
+       → pool not found in DPoS candidates
+       → node not found in DPoS candidates
+```
+
+Any record with problems can be fixed by re-running `register:validators` — the auto-resume will pick up the failed entries automatically.
+
 ## Testing on Testnet
 
 Use the following `.env` to test against testnet with minimal amounts:
