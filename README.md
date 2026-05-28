@@ -14,47 +14,61 @@ All generated accounts and transaction results are saved to `output/validators.j
 
 ```mermaid
 flowchart TD
-    START([Start loop\n i = 1 to TOTAL]) --> STEP1
+    START([Start]) --> PHASE1
 
-    subgraph STEP1 [Step 1 · Create Accounts]
-        A1[Generate pool keypair\naddress + privateKey + publicKey]
-        A2[Generate node keypair\naddress + privateKey + publicKey]
-        A1 --> A2
+    subgraph PHASE1 [Phase 1 · Resume Incomplete Records]
+        R1{Any pending or\nfailed records\nin validators.json?}
+        R2[For each incomplete record\nin order]
+        R3{activationTxHash\nset OR balance\n>= MIN_PLEDGE?}
+        R4[Skip funding\nalready funded]
+        R5[Fund pool account\ngasSendOperation\nwait for confirmation]
+        R6[Check balance\n>= MIN_PLEDGE]
+        R7{applyTxHash\nalready set?}
+        R8[Skip apply\nalready applied]
+        R9[Apply to DPoS contract\nwait for confirmation]
+        R10[status = applied\nsave to file]
+        R1 -->|Yes| R2
+        R2 --> R3
+        R3 -->|Yes| R4
+        R3 -->|No| R5
+        R4 --> R6
+        R5 --> R6
+        R6 --> R7
+        R7 -->|Yes| R8
+        R7 -->|No| R9
+        R8 --> R10
+        R9 --> R10
+        R10 --> R2
     end
 
-    STEP1 --> SAVE1[Save both keypairs to\noutput/validators.json\nstatus = pending]
+    R1 -->|No| PHASE2
+    R10 --> R1
 
-    SAVE1 --> STEP2
-
-    subgraph STEP2 [Step 2 · Fund Pool Account]
-        B1[Funder sends TRANSFER_AMOUNT ZETA\nto pool address via gasSendOperation\nauto-creates account on-chain]
-        B2[Wait for tx confirmation]
-        B3[Check pool balance\n>= MIN_PLEDGE?]
-        B1 --> B2 --> B3
+    subgraph PHASE2 [Phase 2 · Create New Validators]
+        N1{applied count\n< TOTAL?}
+        N2[Step 1: Generate pool keypair\n+ node keypair]
+        N3[Save both keypairs\nstatus = pending]
+        N4[Step 2: Fund pool account\ngasSendOperation\nwait for confirmation]
+        N5[Check balance\n>= MIN_PLEDGE?]
+        N6[Step 3: Apply to DPoS contract\npool + node address\ncoinAmount = MIN_PLEDGE\nwait for confirmation]
+        N7[status = applied\nsave to file]
+        FAIL[status = failed\nsave error\nskip to next]
+        N1 -->|Yes| N2
+        N2 --> N3
+        N3 --> N4
+        N4 --> N5
+        N5 -->|No| FAIL
+        N5 -->|Yes| N6
+        N6 --> N7
+        N7 --> N1
+        FAIL --> N1
     end
 
-    B3 -->|No| FAIL
-    B3 -->|Yes| STEP3
+    N1 -->|No| END([Done · print summary])
 
-    subgraph STEP3 [Step 3 · Apply to DPoS Contract]
-        C1[Pool account calls DPoS.apply\nrole = validator\npool = pool address\nnode = node address\ncoinAmount = MIN_PLEDGE]
-        C2[Wait for tx confirmation]
-        C1 --> C2
-    end
-
-    STEP3 --> SAVE2[Update record in\noutput/validators.json\nstatus = applied]
-    SAVE2 --> NEXT{More\nvalidators?}
-    NEXT -->|Yes| START
-    NEXT -->|No| END([Done\nprint summary])
-
-    FAIL[Update record\nstatus = failed\nsave error message] --> NEXT
-
-    style STEP1 fill:#e8f4f8,stroke:#4a90d9
-    style STEP2 fill:#e8f8e8,stroke:#4a9d4a
-    style STEP3 fill:#f8f4e8,stroke:#d9a04a
+    style PHASE1 fill:#e8f4f8,stroke:#4a90d9
+    style PHASE2 fill:#e8f8e8,stroke:#4a9d4a
     style FAIL fill:#f8e8e8,stroke:#d94a4a
-    style SAVE1 fill:#f0f0f0,stroke:#888
-    style SAVE2 fill:#f0f0f0,stroke:#888
 ```
 
 ## Prerequisites
@@ -104,11 +118,8 @@ TRANSFER_AMOUNT=100000000000
 FUNDER_ADDRESS=ZTX3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 FUNDER_PRIVATE_KEY=privbxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# Number of validators to register (default: 337)
+# Number of validators to register
 TOTAL=337
-
-# Resume from a specific index if a previous run was interrupted (default: 1)
-START_INDEX=1
 ```
 
 ## Run
@@ -119,15 +130,27 @@ npm run register:validators
 
 Console output example:
 ```
-── Validator 1/337 ──────────────────────────────
-  [1] Creating pool and node accounts...
-    Pool: ZTX3abc...
-    Node: ZTX3xyz...
+Found 2 incomplete record(s) from previous run — resuming...
+
+── Resuming Validator 1 (status: pending) ──────────────────
   [2] Funding pool account ZTX3abc... with 100000000000 ZETA...
     Funding tx: a1b2c3...
     Pool balance: 100000000000 ZETA
   [3] Applying as validator (pool: ZTX3abc..., node: ZTX3xyz...)...
     Apply tx: d4e5f6...
+  Done ✓
+
+Creating 335 new validator(s)...
+
+── Validator 3/337 ──────────────────────────────
+  [1] Creating pool and node accounts...
+    Pool: ZTX3def...
+    Node: ZTX3ghi...
+  [2] Funding pool account ZTX3def... with 100000000000 ZETA...
+    Funding tx: e5f6g7...
+    Pool balance: 100000000000 ZETA
+  [3] Applying as validator (pool: ZTX3def..., node: ZTX3ghi...)...
+    Apply tx: h8i9j0...
   Done ✓
 ```
 
@@ -168,15 +191,23 @@ Results are saved to `output/validators.json` after **each validator** is proces
 | Used during registration | Yes | Address only (registered in DPoS) |
 | Used when running node | No | Yes — configure in node server |
 
-## Resuming an Interrupted Run
+## Resume on Restart
 
-If the script stops midway, set `START_INDEX` in `.env` to the index of the last failed entry and re-run:
+If the script is interrupted (kill, crash, network error), simply re-run it:
 
 ```bash
-START_INDEX=50 npm run register:validators
+npm run register:validators
 ```
 
-Already-completed entries in `output/validators.json` are preserved.
+On startup it automatically scans `validators.json` for any `pending` or `failed` records and completes them first, using the **on-chain balance as the source of truth** to determine which steps were already done:
+
+| State | What the script does |
+|---|---|
+| Keys saved, not funded | Fund pool → apply |
+| Funded (balance ok), not applied | Skip funding → apply only |
+| Funding tx recorded, not applied | Skip funding → apply only |
+| Both txs recorded, status not applied | Mark as applied |
+| Fully applied | Skip entirely |
 
 ## Testing on Testnet
 
@@ -190,7 +221,6 @@ TRANSFER_AMOUNT=10000
 FUNDER_ADDRESS=<your testnet address>
 FUNDER_PRIVATE_KEY=<your testnet private key>
 TOTAL=3
-START_INDEX=1
 ```
 
 Then run:
@@ -213,4 +243,4 @@ npm run register:validators
 - Validator applications require **committee approval** before becoming active.
 - After applying, a committee member must call `approve` on the DPoS contract to admit each validator.
 - 1 ZETRIX = 1,000,000 ZETA (base units)
-- `TRANSFER_AMOUNT` must be at least `MIN_PLEDGE + ~5,000 ZETA` to cover the pledge and gas fees for the apply transaction.
+- `TRANSFER_AMOUNT` must be at least `MIN_PLEDGE + ~5,000 ZETA` to cover the pledge and gas fees.
