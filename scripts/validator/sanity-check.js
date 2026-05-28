@@ -7,7 +7,6 @@ const HOST        = process.env.HOST || 'node.zetrix.com';
 const OUTPUT_FILE = './output/validators.json';
 
 const sdk = new ZtxChainSDK({ host: HOST, secure: true });
-process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0;
 
 const PASS = '✓';
 const FAIL = '✗';

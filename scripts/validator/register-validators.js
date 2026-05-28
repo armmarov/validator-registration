@@ -18,7 +18,6 @@ const CONFIRM_RETRIES = 15;
 const CONFIRM_DELAY   = 3000;
 
 const sdk = new ZtxChainSDK({ host: HOST, secure: true });
-process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0;
 
 // ── Output helpers ───────────────────────────────────────────────────────────
 
