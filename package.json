@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "register:validators": "node scripts/validator/register-validators.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.1",
+    "ssl-root-cas": "^1.3.1",
+    "zetrix-sdk-nodejs": "^1.0.1"
+  },
+  "name": "validator-registration"
+}
