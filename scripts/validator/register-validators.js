@@ -11,12 +11,12 @@ const FUNDER_KEY      = process.env.FUNDER_PRIVATE_KEY;
 const DPOS_CONTRACT   = process.env.DPOS_CONTRACT    || 'ZTX3ePNZQhndgGzKLmg1SFfno3N42mLhPYJMN';
 const TRANSFER_AMOUNT = process.env.TRANSFER_AMOUNT  || '100000000000'; // default: 100,000 ZETRIX
 const MIN_PLEDGE      = process.env.MIN_PLEDGE       || '100000000000'; // default: 100,000 ZETRIX
-const REWARD_RATIO    = 0;               // % of block rewards shared with voters
+const REWARD_RATIO    = 0;
 const TOTAL           = parseInt(process.env.TOTAL       || '337');
 const START_INDEX     = parseInt(process.env.START_INDEX || '1');
 const OUTPUT_FILE     = './output/validators.json';
 const CONFIRM_RETRIES = 15;
-const CONFIRM_DELAY   = 3000; // ms between confirmation polling
+const CONFIRM_DELAY   = 3000;
 
 const sdk = new ZtxChainSDK({ host: HOST, secure: true });
 process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0;
@@ -36,7 +36,7 @@ function saveOutput(records) {
     fs.writeFileSync(OUTPUT_FILE, JSON.stringify(records, null, 2));
 }
 
-// ── Transaction helpers ───────────────────────────────────────────────────────
+// ── Transaction helpers ──────────────────────────────────────────────────────
 
 async function waitForTx(hash) {
     for (let i = 0; i < CONFIRM_RETRIES; i++) {
@@ -89,7 +89,7 @@ async function submitTx(sourceAddress, privateKey, operation) {
     return submitted.result.hash;
 }
 
-// ── Step 1: Create new account (async) ───────────────────────────────────────
+// ── Account creation ─────────────────────────────────────────────────────────
 
 async function createAccount() {
     const result = await sdk.account.create();
@@ -101,15 +101,15 @@ async function createAccount() {
     };
 }
 
-// ── Step 2: Activate new account + transfer 100,000 ZETRIX from funder ───────
-// Uses accountActivateOperation because the new account does not exist on-chain yet.
+// ── Step 2: Activate pool account + transfer ZETRIX from funder ──────────────
+// Node account is NOT funded — keypair only, used when setting up the validator node.
 
-async function activateAndFund(newAddress) {
-    console.log(`  [2] Activating and funding ${newAddress} with ${TRANSFER_AMOUNT} ZETA...`);
+async function activateAndFund(poolAddress) {
+    console.log(`  [2] Activating pool account ${poolAddress} with ${TRANSFER_AMOUNT} ZETA...`);
 
     const operation = sdk.operation.accountActivateOperation({
         sourceAddress: FUNDER_ADDRESS,
-        destAddress:   newAddress,
+        destAddress:   poolAddress,
         initBalance:   TRANSFER_AMOUNT,
     });
     if (operation.errorCode !== 0) throw new Error(`accountActivateOperation failed [${operation.errorCode}]: ${JSON.stringify(operation)}`);
@@ -120,30 +120,32 @@ async function activateAndFund(newAddress) {
     return hash;
 }
 
-// ── Step 3: Apply to DPoS contract as validator ──────────────────────────────
+// ── Step 3: Apply to DPoS contract ──────────────────────────────────────────
+// Pool address is the sender and reward receiver.
+// Node address is the P2P node identity — registered separately, not funded here.
 
-async function applyAsValidator(address, privateKey) {
-    console.log(`  [3] Applying as validator from ${address}...`);
+async function applyAsValidator(poolAddress, poolPrivateKey, nodeAddress) {
+    console.log(`  [3] Applying as validator (pool: ${poolAddress}, node: ${nodeAddress})...`);
 
     const input = {
         method: 'apply',
         params: {
             role:  'validator',
-            pool:  address,      // reward pool = own address
+            pool:  poolAddress,   // reward pool address
             ratio: REWARD_RATIO,
-            node:  address,      // node address = own address
+            node:  nodeAddress,   // P2P node address (separate keypair)
         },
     };
 
     const operation = await sdk.operation.contractInvokeByGasOperation({
         contractAddress: DPOS_CONTRACT,
-        sourceAddress:   address,
-        gasAmount:       MIN_PLEDGE,  // pledge sent with the apply call
+        sourceAddress:   poolAddress,
+        gasAmount:       MIN_PLEDGE,
         input:           JSON.stringify(input),
     });
     if (operation.errorCode !== 0) throw new Error(`contractInvokeByGasOperation failed [${operation.errorCode}]: ${JSON.stringify(operation)}`);
 
-    const hash = await submitTx(address, privateKey, operation.result.operation);
+    const hash = await submitTx(poolAddress, poolPrivateKey, operation.result.operation);
     console.log(`    Apply tx: ${hash}`);
     await waitForTx(hash);
     return hash;
@@ -166,34 +168,39 @@ async function main() {
         console.log(`\n── Validator ${i}/${TOTAL} ──────────────────────────────`);
 
         const record = {
-            index:           i,
-            address:         null,
-            privateKey:      null,
-            publicKey:       null,
+            index:            i,
+            pool:             { address: null, privateKey: null, publicKey: null },
+            node:             { address: null, privateKey: null, publicKey: null },
             activationTxHash: null,
-            applyTxHash:     null,
-            status:          'pending',
-            timestamp:       new Date().toISOString(),
+            applyTxHash:      null,
+            status:           'pending',
+            timestamp:        new Date().toISOString(),
         };
 
         try {
-            // Step 1: Create account
-            console.log(`  [1] Creating new account...`);
-            const account = await createAccount();
-            record.address    = account.address;
-            record.privateKey = account.privateKey;
-            record.publicKey  = account.publicKey;
-            console.log(`    Address: ${account.address}`);
+            // Step 1: Create pool account + node account
+            console.log(`  [1] Creating pool and node accounts...`);
+            const poolAccount = await createAccount();
+            const nodeAccount = await createAccount();
 
-            // Save immediately after key generation so keys are never lost
+            record.pool = poolAccount;
+            record.node = nodeAccount;
+            console.log(`    Pool: ${poolAccount.address}`);
+            console.log(`    Node: ${nodeAccount.address}`);
+
+            // Save keys immediately — never lose them even if next steps fail
             records.push(record);
             saveOutput(records);
 
-            // Step 2: Activate + fund from platform account
-            record.activationTxHash = await activateAndFund(account.address);
+            // Step 2: Activate + fund pool account only
+            record.activationTxHash = await activateAndFund(poolAccount.address);
 
-            // Step 3: Apply as validator
-            record.applyTxHash = await applyAsValidator(account.address, account.privateKey);
+            // Step 3: Apply as validator — pool sends tx, node address registered
+            record.applyTxHash = await applyAsValidator(
+                poolAccount.address,
+                poolAccount.privateKey,
+                nodeAccount.address
+            );
 
             record.status = 'applied';
             records[records.length - 1] = record;
