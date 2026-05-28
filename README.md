@@ -226,7 +226,8 @@ It checks each record for:
 | Pool account | Account exists on-chain |
 | Funding tx | Transaction confirmed and `error_code = 0` |
 | Apply tx | Transaction confirmed and `error_code = 0` |
-| DPoS registration | Pool address and node address both in DPoS candidate list |
+
+> DPoS candidate list is not checked here — newly applied validators won't appear until committee approves them.
 
 Output example:
 ```
