@@ -10,6 +10,53 @@ For each iteration it:
 
 All generated accounts and transaction results are saved to `output/validators.json`.
 
+## Flow Diagram
+
+```mermaid
+flowchart TD
+    START([Start loop\n i = 1 to TOTAL]) --> STEP1
+
+    subgraph STEP1 [Step 1 · Create Accounts]
+        A1[Generate pool keypair\naddress + privateKey + publicKey]
+        A2[Generate node keypair\naddress + privateKey + publicKey]
+        A1 --> A2
+    end
+
+    STEP1 --> SAVE1[Save both keypairs to\noutput/validators.json\nstatus = pending]
+
+    SAVE1 --> STEP2
+
+    subgraph STEP2 [Step 2 · Fund Pool Account]
+        B1[Funder sends TRANSFER_AMOUNT ZETA\nto pool address via gasSendOperation\nauto-creates account on-chain]
+        B2[Wait for tx confirmation]
+        B3[Check pool balance\n>= MIN_PLEDGE?]
+        B1 --> B2 --> B3
+    end
+
+    B3 -->|No| FAIL
+    B3 -->|Yes| STEP3
+
+    subgraph STEP3 [Step 3 · Apply to DPoS Contract]
+        C1[Pool account calls DPoS.apply\nrole = validator\npool = pool address\nnode = node address\ncoinAmount = MIN_PLEDGE]
+        C2[Wait for tx confirmation]
+        C1 --> C2
+    end
+
+    STEP3 --> SAVE2[Update record in\noutput/validators.json\nstatus = applied]
+    SAVE2 --> NEXT{More\nvalidators?}
+    NEXT -->|Yes| START
+    NEXT -->|No| END([Done\nprint summary])
+
+    FAIL[Update record\nstatus = failed\nsave error message] --> NEXT
+
+    style STEP1 fill:#e8f4f8,stroke:#4a90d9
+    style STEP2 fill:#e8f8e8,stroke:#4a9d4a
+    style STEP3 fill:#f8f4e8,stroke:#d9a04a
+    style FAIL fill:#f8e8e8,stroke:#d94a4a
+    style SAVE1 fill:#f0f0f0,stroke:#888
+    style SAVE2 fill:#f0f0f0,stroke:#888
+```
+
 ## Prerequisites
 
 - Node.js v14 or later
