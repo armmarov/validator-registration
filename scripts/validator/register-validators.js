@@ -101,22 +101,32 @@ async function createAccount() {
     };
 }
 
-// ── Step 2: Activate pool account + transfer ZETRIX from funder ──────────────
+// ── Step 2: Transfer ZETRIX from funder to pool account ──────────────────────
+// gasSendOperation transfers coins and auto-creates the account if it doesn't exist.
 // Node account is NOT funded — keypair only, used when setting up the validator node.
 
 async function activateAndFund(poolAddress) {
-    console.log(`  [2] Activating pool account ${poolAddress} with ${TRANSFER_AMOUNT} ZETA...`);
+    console.log(`  [2] Funding pool account ${poolAddress} with ${TRANSFER_AMOUNT} ZETA...`);
 
-    const operation = sdk.operation.accountActivateOperation({
+    const operation = sdk.operation.gasSendOperation({
         sourceAddress: FUNDER_ADDRESS,
         destAddress:   poolAddress,
-        initBalance:   TRANSFER_AMOUNT,
+        gasAmount:     TRANSFER_AMOUNT,
     });
-    if (operation.errorCode !== 0) throw new Error(`accountActivateOperation failed [${operation.errorCode}]: ${JSON.stringify(operation)}`);
+    if (operation.errorCode !== 0) throw new Error(`gasSendOperation failed [${operation.errorCode}]: ${JSON.stringify(operation)}`);
 
     const hash = await submitTx(FUNDER_ADDRESS, FUNDER_KEY, operation.result.operation);
-    console.log(`    Activation tx: ${hash}`);
+    console.log(`    Funding tx: ${hash}`);
     await waitForTx(hash);
+
+    const balanceResult = await sdk.account.getBalance(poolAddress);
+    if (balanceResult.errorCode !== 0) throw new Error(`getBalance failed [${balanceResult.errorCode}]: ${JSON.stringify(balanceResult)}`);
+    const balance = balanceResult.result.balance;
+    console.log(`    Pool balance: ${balance} ZETA`);
+    if (new BigNumber(balance).lt(MIN_PLEDGE)) {
+        throw new Error(`Pool balance ${balance} ZETA is less than MIN_PLEDGE ${MIN_PLEDGE} ZETA — cannot apply`);
+    }
+
     return hash;
 }
 
