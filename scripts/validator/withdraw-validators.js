@@ -110,7 +110,7 @@ async function checkProposal(poolAddress) {
 
     // Proposal doesn't exist — already withdrawn or never applied
     if (!proposal) {
-        return { canWithdraw: false, reason: 'No proposal found on-chain (already withdrawn or never applied)' };
+        return { canWithdraw: false, alreadyGone: true, reason: 'No proposal found on-chain (already withdrawn or never applied)' };
     }
 
     // Already approved — use withdraw only after cooldown period, not handled here
@@ -187,8 +187,19 @@ async function main() {
         console.log(`    ${check.reason}`);
 
         if (!check.canWithdraw) {
-            console.log(`    Skipping.`);
-            skipped++;
+            // If the proposal is gone but status is still 'applied', the pledge
+            // was already returned on-chain in a previous run. Update status now.
+            if (check.alreadyGone && record.status === 'applied') {
+                record.status = 'withdrawn';
+                const idx = records.findIndex(r => r.index === record.index);
+                records[idx] = record;
+                saveOutput(records);
+                console.log(`    Status updated to 'withdrawn' — proposal already gone from chain.`);
+                succeeded++;
+            } else {
+                console.log(`    Skipping.`);
+                skipped++;
+            }
             continue;
         }
 
