@@ -77,10 +77,56 @@ async function submitTx(sourceAddress, privateKey, operation) {
     return submitted.result.hash;
 }
 
+// ── Pre-check: query proposal state from DPoS contract ───────────────────────
+// Returns one of:
+//   { canWithdraw: true,  reason: '...' }
+//   { canWithdraw: false, reason: '...' }
+
+async function checkProposal(poolAddress) {
+    const info = await sdk.contract.call({
+        optType:         2,
+        contractAddress: DPOS_CONTRACT,
+        input:           JSON.stringify({
+            method: 'getProposal',
+            params: {
+                operate: 'apply',
+                item:    'validator',
+                address: poolAddress,
+            },
+        }),
+    });
+
+    if (info.errorCode !== 0) {
+        return { canWithdraw: false, reason: `DPoS query failed (${info.errorCode})` };
+    }
+
+    let proposal;
+    try {
+        const parsed = JSON.parse(info.result.query_rets[0].result.value);
+        proposal = parsed.proposal;
+    } catch (e) {
+        return { canWithdraw: false, reason: 'Failed to parse proposal response' };
+    }
+
+    // Proposal doesn't exist — already withdrawn or never applied
+    if (!proposal) {
+        return { canWithdraw: false, reason: 'No proposal found on-chain (already withdrawn or never applied)' };
+    }
+
+    // Already approved — use withdraw only after cooldown period, not handled here
+    if (proposal.passTime !== undefined) {
+        return { canWithdraw: false, reason: 'Proposal was already approved — use withdraw after cooldown period' };
+    }
+
+    // Not yet approved (passTime undefined) — can withdraw anytime to reclaim pledge
+    return {
+        canWithdraw: true,
+        reason:      `Proposal not approved (pledge: ${proposal.pledge} ZETA)`,
+        pledge:      proposal.pledge,
+    };
+}
+
 // ── Withdraw one validator's pledge ──────────────────────────────────────────
-// Calls DPoS.withdraw('validator') from the pool account.
-// If proposal was never approved (passTime undefined), the pledge is
-// refunded immediately. If approved, a cooldown period applies.
 
 async function withdrawValidator(poolAddress, poolPrivateKey) {
     const operation = await sdk.operation.contractInvokeByGasOperation({
@@ -110,29 +156,41 @@ async function main() {
 
     const records = loadOutput();
 
-    // Withdraw for records that applied but were never approved
-    const toWithdraw = records.filter(r =>
+    // Candidates: applied but not approved and not already withdrawn
+    const candidates = records.filter(r =>
         r.applyTxHash &&
         r.status !== 'approved' &&
         !r.withdrawTxHash
     );
 
-    console.log(`Withdraw validators — reclaim pledges from expired/unapproved proposals`);
+    console.log(`Withdraw validators — reclaim pledges from unapproved proposals`);
     console.log(`Host: ${HOST}`);
     console.log(`DPoS contract: ${DPOS_CONTRACT}`);
-    console.log(`Records to withdraw: ${toWithdraw.length} of ${records.length}\n`);
+    console.log(`Candidates to check: ${candidates.length} of ${records.length}\n`);
 
-    if (toWithdraw.length === 0) {
+    if (candidates.length === 0) {
         console.log('Nothing to withdraw.');
         return;
     }
 
     let succeeded = 0;
+    let skipped   = 0;
     let failed    = 0;
 
-    for (const record of toWithdraw) {
+    for (const record of candidates) {
         const pool = record.pool || {};
-        console.log(`\n── Withdrawing Validator ${record.index} — pool: ${pool.address}`);
+        console.log(`\n── Validator ${record.index} — pool: ${pool.address}`);
+
+        // Pre-check: query on-chain proposal state before submitting any tx
+        console.log(`    Checking proposal state on-chain...`);
+        const check = await checkProposal(pool.address);
+        console.log(`    ${check.reason}`);
+
+        if (!check.canWithdraw) {
+            console.log(`    Skipping.`);
+            skipped++;
+            continue;
+        }
 
         try {
             record.withdrawTxHash = await withdrawValidator(pool.address, pool.privateKey);
@@ -150,7 +208,7 @@ async function main() {
         saveOutput(records);
     }
 
-    console.log(`\nCompleted. Withdrawn: ${succeeded} | Failed: ${failed}`);
+    console.log(`\nCompleted. Withdrawn: ${succeeded} | Skipped: ${skipped} | Failed: ${failed}`);
     console.log(`Results saved to ${OUTPUT_FILE}`);
 }
 
