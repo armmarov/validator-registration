@@ -156,11 +156,16 @@ async function main() {
 
     const records = loadOutput();
 
-    // Candidates: applied but not approved and not already withdrawn
+    // Include all records that are not yet in a final withdrawn/approved state.
+    // This catches:
+    //   - status='applied', no withdrawTxHash          → needs withdraw
+    //   - status='applied', withdrawTxHash set          → tx was submitted but status
+    //                                                     not updated (crashed mid-run)
+    //   - status='failed'  with applyTxHash             → may be withdrawable
     const candidates = records.filter(r =>
         r.applyTxHash &&
         r.status !== 'approved' &&
-        !r.withdrawTxHash
+        r.status !== 'withdrawn'
     );
 
     console.log(`Withdraw validators — reclaim pledges from unapproved proposals`);
@@ -179,20 +184,42 @@ async function main() {
 
     for (const record of candidates) {
         const pool = record.pool || {};
+        const idx  = records.findIndex(r => r.index === record.index);
         console.log(`\n── Validator ${record.index} — pool: ${pool.address}`);
 
-        // Pre-check: query on-chain proposal state before submitting any tx
+        // ── Case 1: withdrawTxHash already set — tx submitted in a previous run
+        //    but status was never updated. Verify the tx on-chain and sync status.
+        if (record.withdrawTxHash) {
+            console.log(`    Withdraw tx already recorded: ${record.withdrawTxHash.substring(0, 16)}...`);
+            console.log(`    Verifying tx on-chain...`);
+            const txInfo = await sdk.transaction.getInfo(record.withdrawTxHash);
+            if (txInfo.errorCode === 0 && parseInt(txInfo.result.transactions[0].error_code) === 0) {
+                record.status = 'withdrawn';
+                records[idx]  = record;
+                saveOutput(records);
+                console.log(`    Status updated to 'withdrawn' — tx confirmed on-chain.`);
+                succeeded++;
+            } else {
+                // Tx not found or failed — clear the hash and fall through to retry
+                console.log(`    Tx not confirmed (${txInfo.errorCode}) — clearing hash and retrying...`);
+                record.withdrawTxHash = null;
+                records[idx] = record;
+                saveOutput(records);
+            }
+            if (record.status === 'withdrawn') continue;
+        }
+
+        // ── Case 2: No withdrawTxHash — check proposal state on-chain first
         console.log(`    Checking proposal state on-chain...`);
         const check = await checkProposal(pool.address);
         console.log(`    ${check.reason}`);
 
         if (!check.canWithdraw) {
-            // If the proposal is gone but status is still 'applied', the pledge
-            // was already returned on-chain in a previous run. Update status now.
-            if (check.alreadyGone && record.status === 'applied') {
+            // Proposal is gone from chain but status not updated — pledge was
+            // already returned in a previous run that crashed before file write.
+            if (check.alreadyGone) {
                 record.status = 'withdrawn';
-                const idx = records.findIndex(r => r.index === record.index);
-                records[idx] = record;
+                records[idx]  = record;
                 saveOutput(records);
                 console.log(`    Status updated to 'withdrawn' — proposal already gone from chain.`);
                 succeeded++;
@@ -203,6 +230,7 @@ async function main() {
             continue;
         }
 
+        // ── Case 3: Proposal exists and is withdrawable — submit withdraw tx
         try {
             record.withdrawTxHash = await withdrawValidator(pool.address, pool.privateKey);
             record.status         = 'withdrawn';
@@ -214,7 +242,6 @@ async function main() {
             console.error(`  FAILED: ${err.message}`);
         }
 
-        const idx = records.findIndex(r => r.index === record.index);
         records[idx] = record;
         saveOutput(records);
     }
