@@ -154,15 +154,16 @@ async function main() {
     console.log(`Validator registration — total: ${TOTAL}`);
     console.log(`Host: ${HOST}\n`);
 
-    // Phase 1: resume pending / failed / withdrawn (anything not yet applied/approved)
-    const incomplete = records
+    // Phase 1: verify ALL existing records via getProposal on-chain.
+    // Never trust local status alone — always confirm from smart contract.
+    const existing = records
         .map((r, i) => ({ record: r, index: i }))
-        .filter(({ record }) => record.status !== 'applied' && record.status !== 'approved');
+        .filter(({ record }) => record.pool && record.pool.address && record.status !== 'approved');
 
-    if (incomplete.length > 0) {
-        console.log(`Found ${incomplete.length} incomplete record(s) — resuming...\n`);
-        for (const { record, index } of incomplete) {
-            console.log(`\n── Resuming Validator ${record.index} (status: ${record.status}) ──────────────────`);
+    if (existing.length > 0) {
+        console.log(`Verifying ${existing.length} existing record(s) on-chain...\n`);
+        for (const { record, index } of existing) {
+            console.log(`\n── Validator ${record.index} (local status: ${record.status}) ──────────────────`);
             await processRecord(record, records, index);
         }
     }
