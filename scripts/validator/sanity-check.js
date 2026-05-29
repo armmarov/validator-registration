@@ -1,25 +1,29 @@
 require('dotenv').config();
 const ZtxChainSDK = require('zetrix-sdk-nodejs');
+const BigNumber = require('bignumber.js');
 const fs = require('fs');
 const { PROPOSAL, getProposalState, getOnChainBalance } = require('./utils');
-const BigNumber = require('bignumber.js');
 
 const HOST          = process.env.HOST          || 'node.zetrix.com';
 const DPOS_CONTRACT = process.env.DPOS_CONTRACT || 'ZTX3ePNZQhndgGzKLmg1SFfno3N42mLhPYJMN';
-const MIN_PLEDGE    = process.env.MIN_PLEDGE    || '100000000000';
 const OUTPUT_FILE   = './output/validators.json';
 
 const sdk = new ZtxChainSDK({ host: HOST, secure: true });
 
 const PASS = '✓';
 const FAIL = '✗';
+const WARN = '!';
 
-// Expected on-chain proposal state per local status
-const EXPECTED_STATE = {
-    'applied':   PROPOSAL.PENDING_APPROVAL,
-    'approved':  PROPOSAL.APPROVED,
-    'withdrawn': PROPOSAL.NOT_FOUND,
+// Map on-chain proposal state to expected local status
+const STATE_TO_STATUS = {
+    [PROPOSAL.PENDING_APPROVAL]: 'applied',
+    [PROPOSAL.APPROVED]:         'approved',
+    [PROPOSAL.NOT_FOUND]:        'withdrawn',
 };
+
+function saveOutput(records) {
+    fs.writeFileSync(OUTPUT_FILE, JSON.stringify(records, null, 2));
+}
 
 async function main() {
     if (!fs.existsSync(OUTPUT_FILE)) {
@@ -36,16 +40,19 @@ async function main() {
     console.log(`Sanity check — ${records.length} record(s)`);
     console.log(`Host: ${HOST} | DPoS: ${DPOS_CONTRACT}\n`);
 
-    const problems = [];
-    const counts   = {};
+    const problems    = [];
+    const statusFixed = [];
+    const counts      = {};
     let passed = 0;
+    let changed = false;
 
     for (const record of records) {
         const idx    = record.index;
-        const pool   = record.pool  || {};
-        const node   = record.node  || {};
+        const pool   = record.pool || {};
+        const node   = record.node || {};
         const status = record.status;
         const issues = [];
+        let   icon   = PASS;
 
         counts[status] = (counts[status] || 0) + 1;
 
@@ -55,61 +62,96 @@ async function main() {
         if (!node.address)    issues.push('node.address missing');
         if (!node.privateKey) issues.push('node.privateKey missing');
 
-        if (!pool.address) {
-            problems.push({ index: idx, pool: null, node: null, issues });
-            console.log(`  ${FAIL} [${idx}] ${(status || '?').padEnd(10)} pool: N/A`);
-            continue;
-        }
+        let balanceStr     = 'N/A';
+        let proposalState  = 'N/A';
+        let statusUpdated  = false;
 
-        if (status === 'pending' || status === 'failed') {
-            // Not yet on-chain — just flag as incomplete
-            issues.push(`registration incomplete (status: ${status})`);
-        } else if (EXPECTED_STATE[status]) {
-            // 2. Pool account exists on-chain
+        if (pool.address) {
+            // 2. On-chain balance
             const balance = await getOnChainBalance(sdk, pool.address);
             if (balance === null) {
-                issues.push(`pool account not found on-chain`);
+                issues.push('pool account not found on-chain');
+                balanceStr = 'NOT FOUND';
+            } else {
+                balanceStr = `${balance} ZETA`;
+                // Store balance in record for reference
+                record.poolBalance = balance;
+                changed = true;
             }
 
-            // 3. getProposal must match expected state for this status
-            const onChainState = await getProposalState(sdk, DPOS_CONTRACT, pool.address);
-            const expected     = EXPECTED_STATE[status];
+            // 3. getProposal — source of truth for registration status
+            if (status !== 'pending' && status !== 'failed') {
+                const onChainState = await getProposalState(sdk, DPOS_CONTRACT, pool.address);
+                proposalState      = onChainState;
 
-            if (onChainState === PROPOSAL.QUERY_ERROR) {
-                issues.push(`getProposal query failed — could not verify`);
-            } else if (onChainState !== expected) {
-                issues.push(`on-chain state mismatch: expected '${expected}' but got '${onChainState}' (local status: '${status}')`);
+                if (onChainState === PROPOSAL.QUERY_ERROR) {
+                    issues.push('getProposal query failed');
+                } else {
+                    const expectedStatus = STATE_TO_STATUS[onChainState];
+
+                    if (expectedStatus && expectedStatus !== status) {
+                        // On-chain state doesn't match local status — auto-update
+                        const oldStatus   = status;
+                        record.status     = expectedStatus;
+                        counts[oldStatus] = (counts[oldStatus] || 1) - 1;
+                        counts[expectedStatus] = (counts[expectedStatus] || 0) + 1;
+                        statusUpdated = true;
+                        statusFixed.push({ index: idx, from: oldStatus, to: expectedStatus });
+                        changed = true;
+                        icon = WARN;
+                    }
+                }
+            } else {
+                issues.push(`registration incomplete (status: ${status})`);
             }
-        } else {
-            issues.push(`unknown status '${status}'`);
         }
 
-        if (issues.length === 0) {
+        const displayStatus = record.status.padEnd(10);
+        const line          = `  ${icon} [${idx}] ${displayStatus} balance: ${balanceStr.padEnd(18)} proposal: ${proposalState}`;
+
+        if (issues.length === 0 && !statusUpdated) {
             passed++;
-            console.log(`  ${PASS} [${idx}] ${status.padEnd(10)} pool: ${pool.address}`);
+            console.log(line);
+        } else if (statusUpdated) {
+            console.log(line + ` ← status auto-updated from '${statusFixed[statusFixed.length - 1].from}'`);
         } else {
             problems.push({ index: idx, pool: pool.address, node: node.address, issues });
-            console.log(`  ${FAIL} [${idx}] ${(status || '?').padEnd(10)} pool: ${pool.address}`);
+            console.log(line);
+            for (const issue of issues) {
+                console.log(`       → ${issue}`);
+            }
         }
+    }
+
+    // Save updated records (balance + any status fixes)
+    if (changed) {
+        saveOutput(records);
     }
 
     // Summary
     const countStr = Object.entries(counts).map(([s, n]) => `${s}: ${n}`).join(' | ');
-    console.log(`\n${'─'.repeat(60)}`);
-    console.log(`Result: ${passed}/${records.length} passed`);
+    console.log(`\n${'─'.repeat(70)}`);
+    console.log(`Result:    ${passed + statusFixed.length}/${records.length} ok`);
     console.log(`Breakdown: ${countStr}`);
 
+    if (statusFixed.length > 0) {
+        console.log(`\nAuto-fixed ${statusFixed.length} status mismatch(es):`);
+        for (const fix of statusFixed) {
+            console.log(`  [${fix.index}] '${fix.from}' → '${fix.to}'`);
+        }
+    }
+
     if (problems.length > 0) {
-        console.log(`\nProblems (${problems.length}):\n`);
+        console.log(`\nProblems (${problems.length}):`);
         for (const p of problems) {
-            console.log(`  ${FAIL} [${p.index}] pool: ${p.pool || 'N/A'} | node: ${p.node || 'N/A'}`);
+            console.log(`  ${FAIL} [${p.index}] pool: ${p.pool || 'N/A'}`);
             for (const issue of p.issues) {
                 console.log(`       → ${issue}`);
             }
         }
-        console.log(`\nTip: Re-run the appropriate script to fix — register:validators, approve:validators, or withdraw:validators.`);
-    } else {
-        console.log('\nAll records passed.');
+        console.log(`\nTip: Re-run register:validators / approve:validators / withdraw:validators to fix.`);
+    } else if (statusFixed.length === 0) {
+        console.log('\nAll records passed. No issues found.');
     }
 }
 
