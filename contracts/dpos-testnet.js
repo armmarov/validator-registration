@@ -1241,8 +1241,8 @@ function getDefaultConfig(logicContract) {
     /* testnet: 1 ZETA */
     'pledge_magnification': 2,
     'pass_rate': 0.66,
-    'valid_period': 1800000000,
-    /* 30 * 60 * 1000 * 1000 */
+    'valid_period': 2592000000000,
+    /* testnet: 30 days (same as mainnet) */
     'vote_unit': 1,
     /* testnet: 1 ZETA */
     'reward_allocation_share': [100, 0, 0, 0],
