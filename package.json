@@ -1,6 +1,7 @@
 {
   "scripts": {
     "register:validators": "node scripts/validator/register-validators.js",
+    "approve:validators": "node scripts/validator/approve-validators.js",
     "sanity-check": "node scripts/validator/sanity-check.js"
   },
   "dependencies": {

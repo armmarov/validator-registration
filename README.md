@@ -209,6 +209,40 @@ On startup it automatically scans `validators.json` for any `pending` or `failed
 | Both txs recorded, status not applied | Mark as applied |
 | Fully applied | Skip entirely |
 
+## Approve Validators (Committee)
+
+After validators have applied (`status: applied`), a committee member must approve each one. Add the committee credentials to `.env`:
+
+```env
+COMMITTEE_ADDRESS=ZTX3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+COMMITTEE_PRIVATE_KEY=privbxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Then run:
+
+```bash
+npm run approve:validators
+```
+
+The script reads `validators.json`, approves every record with `status: applied` that doesn't yet have an `approveTxHash`, and saves the result back:
+
+```
+Approve validators — committee: ZTX3abc...
+Records to approve: 337 of 337
+
+── Approving Validator 1 — pool: ZTX3def...
+    Approve tx: a1b2c3...
+  Done ✓
+
+── Approving Validator 2 — pool: ZTX3ghi...
+    Approve tx: d4e5f6...
+  Done ✓
+
+Completed. Approved: 337 | Failed: 0
+```
+
+After approval, records are updated with `approveTxHash` and `status: approved`. If interrupted, re-running skips already-approved records automatically.
+
 ## Sanity Check
 
 After registration, run the sanity check to verify every record in `validators.json`:
