@@ -10,7 +10,9 @@ For each iteration it:
 
 All generated accounts and transaction results are saved to `output/validators.json`.
 
-## Flow Diagram
+---
+
+## Registration Flow (`register:validators`)
 
 ```mermaid
 flowchart TD
@@ -19,10 +21,10 @@ flowchart TD
     subgraph PHASE1 [Phase 1 · Resume Incomplete Records]
         R1{Any pending or\nfailed records\nin validators.json?}
         R2[For each incomplete record\nin order]
-        R3{activationTxHash\nset OR balance\n>= MIN_PLEDGE?}
+        R3{activationTxHash set\nOR balance >= MIN_PLEDGE?}
         R4[Skip funding\nalready funded]
         R5[Fund pool account\ngasSendOperation\nwait for confirmation]
-        R6[Check balance\n>= MIN_PLEDGE]
+        R6[Check balance >= MIN_PLEDGE]
         R7{applyTxHash\nalready set?}
         R8[Skip apply\nalready applied]
         R9[Apply to DPoS contract\nwait for confirmation]
@@ -71,6 +73,86 @@ flowchart TD
     style FAIL fill:#f8e8e8,stroke:#d94a4a
 ```
 
+---
+
+## Approval Flow (`approve:validators`)
+
+```mermaid
+flowchart TD
+    START([Start]) --> LOAD
+
+    LOAD[Read validators.json\nfilter status = applied\nAND no approveTxHash] --> CHECK
+
+    CHECK{Any records\nto approve?}
+    CHECK -->|No| DONE_SKIP([Nothing to approve\nExit])
+    CHECK -->|Yes| LOOP
+
+    subgraph LOOP [For each record]
+        A1[Call DPoS.approve\noperate = apply\nitem = validator\naddress = pool address\nfrom COMMITTEE_ADDRESS]
+        A2[Wait for tx confirmation]
+        A3[approveTxHash saved\nstatus = approved\nsave to file]
+        AFAIL[Save error\nstatus unchanged\nskip to next]
+        A1 --> A2
+        A2 -->|success| A3
+        A2 -->|failed| AFAIL
+    end
+
+    LOOP --> NEXT{More\nrecords?}
+    NEXT -->|Yes| LOOP
+    NEXT -->|No| END([Done · print summary\nApproved / Failed])
+
+    style LOOP fill:#f8f4e8,stroke:#d9a04a
+    style AFAIL fill:#f8e8e8,stroke:#d94a4a
+    style DONE_SKIP fill:#f0f0f0,stroke:#888
+```
+
+---
+
+## Withdraw Flow (`withdraw:validators`)
+
+```mermaid
+flowchart TD
+    START([Start]) --> LOAD
+
+    LOAD[Read validators.json\nfilter applyTxHash set\nAND status != approved\nAND no withdrawTxHash] --> CHECK
+
+    CHECK{Any records\nto withdraw?}
+    CHECK -->|No| DONE_SKIP([Nothing to withdraw\nExit])
+    CHECK -->|Yes| LOOP
+
+    subgraph LOOP [For each record]
+        W1[Query DPoS.getProposal\nfor pool address]
+        W2{Proposal\nstate?}
+        W3[Skip\nNo proposal on-chain\nalready withdrawn]
+        W4[Skip\npassTime is set\nalready approved]
+        W5[Proceed\npassTime undefined\npledge is recoverable]
+        W6[Call DPoS.withdraw\nrole = validator\nfrom pool address]
+        W7[Wait for tx confirmation]
+        W8[withdrawTxHash saved\nstatus = withdrawn\nsave to file]
+        WFAIL[Save error\nskip to next]
+        W1 --> W2
+        W2 -->|not found| W3
+        W2 -->|approved| W4
+        W2 -->|not approved| W5
+        W5 --> W6
+        W6 --> W7
+        W7 -->|success| W8
+        W7 -->|failed| WFAIL
+    end
+
+    LOOP --> NEXT{More\nrecords?}
+    NEXT -->|Yes| LOOP
+    NEXT -->|No| END([Done · print summary\nWithdrawn / Skipped / Failed])
+
+    style LOOP fill:#f8e8f8,stroke:#a04ad9
+    style W3 fill:#f0f0f0,stroke:#888
+    style W4 fill:#f0f0f0,stroke:#888
+    style WFAIL fill:#f8e8e8,stroke:#d94a4a
+    style DONE_SKIP fill:#f0f0f0,stroke:#888
+```
+
+---
+
 ## Prerequisites
 
 - Node.js v14 or later
@@ -118,41 +200,22 @@ TRANSFER_AMOUNT=100000000000
 FUNDER_ADDRESS=ZTX3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 FUNDER_PRIVATE_KEY=privbxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
+# Committee account — approves validator applications (approve:validators)
+COMMITTEE_ADDRESS=ZTX3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+COMMITTEE_PRIVATE_KEY=privbxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
 # Number of validators to register
 TOTAL=337
 ```
 
-## Run
+## Scripts
 
-```bash
-npm run register:validators
-```
-
-Console output example:
-```
-Found 2 incomplete record(s) from previous run — resuming...
-
-── Resuming Validator 1 (status: pending) ──────────────────
-  [2] Funding pool account ZTX3abc... with 100000000000 ZETA...
-    Funding tx: a1b2c3...
-    Pool balance: 100000000000 ZETA
-  [3] Applying as validator (pool: ZTX3abc..., node: ZTX3xyz...)...
-    Apply tx: d4e5f6...
-  Done ✓
-
-Creating 335 new validator(s)...
-
-── Validator 3/337 ──────────────────────────────
-  [1] Creating pool and node accounts...
-    Pool: ZTX3def...
-    Node: ZTX3ghi...
-  [2] Funding pool account ZTX3def... with 100000000000 ZETA...
-    Funding tx: e5f6g7...
-    Pool balance: 100000000000 ZETA
-  [3] Applying as validator (pool: ZTX3def..., node: ZTX3ghi...)...
-    Apply tx: h8i9j0...
-  Done ✓
-```
+| Command | Description |
+|---|---|
+| `npm run register:validators` | Create accounts, fund, and apply to DPoS |
+| `npm run approve:validators` | Committee approves all applied validators |
+| `npm run withdraw:validators` | Reclaim pledges from expired/unapproved proposals |
+| `npm run sanity-check` | Verify all records in validators.json |
 
 ## Output
 
@@ -174,11 +237,20 @@ Results are saved to `output/validators.json` after **each validator** is proces
     },
     "activationTxHash": "abc123...",
     "applyTxHash": "def456...",
-    "status": "applied",
+    "approveTxHash": "ghi789...",
+    "status": "approved",
     "timestamp": "2026-05-28T10:00:00.000Z"
   }
 ]
 ```
+
+| Status | Meaning |
+|---|---|
+| `pending` | Keypairs generated, not yet funded or applied |
+| `applied` | Apply tx submitted, awaiting committee approval |
+| `approved` | Committee approved, validator is a candidate |
+| `withdrawn` | Pledge reclaimed after expired/unapproved proposal |
+| `failed` | A step failed — re-run `register:validators` to retry |
 
 > **Keep `output/validators.json` secure** — it contains private keys for all pool and node accounts.
 
@@ -199,49 +271,7 @@ If the script is interrupted (kill, crash, network error), simply re-run it:
 npm run register:validators
 ```
 
-On startup it automatically scans `validators.json` for any `pending` or `failed` records and completes them first, using the **on-chain balance as the source of truth** to determine which steps were already done:
-
-| State | What the script does |
-|---|---|
-| Keys saved, not funded | Fund pool → apply |
-| Funded (balance ok), not applied | Skip funding → apply only |
-| Funding tx recorded, not applied | Skip funding → apply only |
-| Both txs recorded, status not applied | Mark as applied |
-| Fully applied | Skip entirely |
-
-## Approve Validators (Committee)
-
-After validators have applied (`status: applied`), a committee member must approve each one. Add the committee credentials to `.env`:
-
-```env
-COMMITTEE_ADDRESS=ZTX3xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-COMMITTEE_PRIVATE_KEY=privbxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-Then run:
-
-```bash
-npm run approve:validators
-```
-
-The script reads `validators.json`, approves every record with `status: applied` that doesn't yet have an `approveTxHash`, and saves the result back:
-
-```
-Approve validators — committee: ZTX3abc...
-Records to approve: 337 of 337
-
-── Approving Validator 1 — pool: ZTX3def...
-    Approve tx: a1b2c3...
-  Done ✓
-
-── Approving Validator 2 — pool: ZTX3ghi...
-    Approve tx: d4e5f6...
-  Done ✓
-
-Completed. Approved: 337 | Failed: 0
-```
-
-After approval, records are updated with `approveTxHash` and `status: approved`. If interrupted, re-running skips already-approved records automatically.
+On startup it automatically scans `validators.json` for any `pending` or `failed` records and completes them first, using the **on-chain balance as the source of truth** to determine which steps were already done.
 
 ## Sanity Check
 
@@ -251,8 +281,6 @@ After registration, run the sanity check to verify every record in `validators.j
 npm run sanity-check
 ```
 
-It checks each record for:
-
 | Check | What it verifies |
 |---|---|
 | Status | `status === 'applied'` |
@@ -261,39 +289,9 @@ It checks each record for:
 | Funding tx | Transaction confirmed and `error_code = 0` |
 | Apply tx | Transaction confirmed and `error_code = 0` |
 
-> DPoS candidate list is not checked here — newly applied validators won't appear until committee approves them.
-
-Output example:
-```
-Sanity check — 337 record(s) in ./output/validators.json
-Host: node.zetrix.com
-DPoS contract: ZTX3ePNZQhndgGzKLmg1SFfno3N42mLhPYJMN
-
-Fetching DPoS candidate list... 337 candidate(s) found
-
-  ✓ [1] pool: ZTX3abc...
-  ✓ [2] pool: ZTX3def...
-  ✗ [3] pool: ZTX3ghi...
-  ✓ [4] pool: ZTX3jkl...
-  ...
-
-────────────────────────────────────────────────────────────
-Result: 336/337 passed
-
-Problems found (1):
-
-  ✗ [3] pool: ZTX3ghi... | node: ZTX3xyz...
-       → status is 'failed'
-       → apply tx: tx not found (11)
-       → pool not found in DPoS candidates
-       → node not found in DPoS candidates
-```
-
-Any record with problems can be fixed by re-running `register:validators` — the auto-resume will pick up the failed entries automatically.
+> DPoS candidate list is not checked — validators only appear after committee approval.
 
 ## Testing on Testnet
-
-Use the following `.env` to test against testnet with minimal amounts:
 
 ```env
 HOST=test-node.zetrix.com
@@ -302,13 +300,9 @@ MIN_PLEDGE=1
 TRANSFER_AMOUNT=10000
 FUNDER_ADDRESS=<your testnet address>
 FUNDER_PRIVATE_KEY=<your testnet private key>
+COMMITTEE_ADDRESS=<your testnet committee address>
+COMMITTEE_PRIVATE_KEY=<your testnet committee private key>
 TOTAL=3
-```
-
-Then run:
-
-```bash
-npm run register:validators
 ```
 
 ## Contract Addresses
@@ -318,11 +312,10 @@ npm run register:validators
 | Mainnet | `ZTX3ePNZQhndgGzKLmg1SFfno3N42mLhPYJMN` | 100,000 ZETRIX |
 | Testnet | `ZTX3JsY9qM3VfqKPpoLGKpwnKbtAD92wMd3My` | 1 ZETA |
 
-> The testnet contract (`contracts/dpos-testnet.js`) is a modified version with `validator_min_pledge: 1`, `kol_min_pledge: 1`, and `vote_unit: 1` for easy testing.
+> The testnet contract (`contracts/dpos-testnet.js`) is a modified version with `validator_min_pledge: 1`, `kol_min_pledge: 1`, `vote_unit: 1`, and `valid_period: 30 days` for easy testing.
 
 ## Notes
 
 - Validator applications require **committee approval** before becoming active.
-- After applying, a committee member must call `approve` on the DPoS contract to admit each validator.
 - 1 ZETRIX = 1,000,000 ZETA (base units)
 - `TRANSFER_AMOUNT` must be at least `MIN_PLEDGE + ~5,000 ZETA` to cover the pledge and gas fees.
